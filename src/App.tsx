@@ -10,6 +10,12 @@ import {
   GENERATORS, UPGRADES, EPOCHS, ACHIEVEMENTS, PRESTIGE_UPGRADES,
   STORY_DIALOGS, formatNumber
 } from './game/data';
+import {
+  initYandexSDK, gameReady, gameplayStart, gameplayStop,
+  showInterstitialAd, showRewardedAd, getRemainingRewardedAds,
+  saveToCloud, loadFromCloud, submitScore,
+  isSDKAvailable, isSDKInitialized, getEnvironment
+} from './game/yandex-sdk';
 
 type Tab = 'world' | 'shop' | 'story' | 'tree' | 'profile';
 type ShopTab = 'generators' | 'upgrades';
@@ -62,6 +68,74 @@ export default function App() {
   const comboRef = useRef(0);
   const lastClickTime = useRef(0);
 
+  // SDK state
+  const [sdkReady, setSdkReady] = useState(false);
+  const [sdkAvailable, setSdkAvailable] = useState(false);
+  const [boostActive, setBoostActive] = useState(false);
+  const [boostEndTime, setBoostEndTime] = useState(0);
+
+  // Initialize Yandex Games SDK
+  useEffect(() => {
+    const initSDK = async () => {
+      setSdkAvailable(isSDKAvailable());
+      const sdk = await initYandexSDK();
+      if (sdk) {
+        setSdkReady(true);
+        // Signal game ready
+        gameReady();
+        gameplayStart();
+
+        // Detect language from SDK
+        const env = getEnvironment();
+        if (env) {
+          setState(prev => ({
+            ...prev,
+            settings: { ...prev.settings, language: env.lang }
+          }));
+        }
+
+        // Try to load cloud save
+        const cloudData = await loadFromCloud();
+        if (cloudData && cloudData.saveData) {
+          try {
+            const imported = importSave(cloudData.saveData as string);
+            if (imported) {
+              const localData = loadGame();
+              // Compare timestamps - use newer save
+              const localTime = localData?.lastSaveTime || 0;
+              const cloudTime = (cloudData.timestamp as number) || 0;
+              if (cloudTime > localTime) {
+                setState(imported);
+              }
+            }
+          } catch (e) {
+            console.warn('Cloud save parse error:', e);
+          }
+        }
+      }
+    };
+    initSDK();
+  }, []);
+
+  // Handle visibility change (pause/resume)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) {
+        gameplayStop();
+        saveGame(stateRef.current);
+        // Cloud save
+        if (sdkReady) {
+          const exportCode = exportSave(stateRef.current);
+          saveToCloud({ saveData: exportCode, timestamp: Date.now() });
+        }
+      } else {
+        gameplayStart();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [sdkReady]);
+
   // Check for offline income on load
   useEffect(() => {
     const saved = loadGame();
@@ -73,6 +147,17 @@ export default function App() {
       }
     }
   }, []);
+
+  // Boost timer
+  useEffect(() => {
+    if (!boostActive) return;
+    const interval = setInterval(() => {
+      if (Date.now() >= boostEndTime) {
+        setBoostActive(false);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [boostActive, boostEndTime]);
 
   // Game loop
   useEffect(() => {
@@ -117,13 +202,18 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-save every 30 seconds
+  // Auto-save every 30 seconds (local + cloud)
   useEffect(() => {
     const interval = setInterval(() => {
       saveGame(stateRef.current);
+      // Also save to cloud if SDK is ready
+      if (sdkReady) {
+        const exportCode = exportSave(stateRef.current);
+        saveToCloud({ saveData: exportCode, timestamp: Date.now() });
+      }
     }, 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [sdkReady]);
 
   // Achievement checker
   useEffect(() => {
@@ -187,6 +277,13 @@ export default function App() {
         shards: prev.shards + 20,
       }));
       setShowBoss(false);
+
+      // Show interstitial ad after boss
+      if (sdkReady) {
+        showInterstitialAd();
+        // Submit score to leaderboard
+        submitScore('total_time', Math.floor(stateRef.current.totalTimeEarned.log10() * 100));
+      }
 
       // Show end dialog
       const endDialog = STORY_DIALOGS.find(d => d.epoch === state.currentEpoch && d.trigger === 'end');
@@ -314,19 +411,49 @@ export default function App() {
     setState(prev => applyUpgrade(prev, upgradeId));
   };
 
-  const handlePrestige = () => {
+  const handlePrestige = async () => {
     setState(prev => performPrestige(prev));
     setShowPrestige(false);
     setTab('world');
+    // Show interstitial after prestige
+    if (sdkReady) {
+      showInterstitialAd();
+      submitScore('prestige_count', stateRef.current.prestigeCount + 1);
+    }
   };
 
-  const handleOfflineCollect = (multiplier: number = 1) => {
+  const handleOfflineCollect = async (multiplier: number = 1) => {
+    if (multiplier === 3) {
+      // Show rewarded ad for x3 bonus
+      const success = await showRewardedAd();
+      if (!success) {
+        // Ad failed or was skipped, give x1
+        multiplier = 1;
+      }
+    }
     setState(prev => ({
       ...prev,
       time: prev.time.add(offlineIncome.mul(multiplier)),
       totalTimeEarned: prev.totalTimeEarned.add(offlineIncome.mul(multiplier)),
     }));
     setShowOffline(false);
+  };
+
+  // Activate time boost via rewarded ad
+  const handleActivateBoost = async () => {
+    const success = await showRewardedAd();
+    if (success) {
+      setBoostActive(true);
+      setBoostEndTime(Date.now() + 4 * 60 * 60 * 1000); // 4 hours
+    }
+  };
+
+  // Get free shards via rewarded ad
+  const handleFreeShards = async () => {
+    const success = await showRewardedAd();
+    if (success) {
+      setState(prev => ({ ...prev, shards: prev.shards + 10 }));
+    }
   };
 
   const handleExport = () => {
@@ -456,6 +583,17 @@ export default function App() {
             <div className="text-white font-bold">{formatNumber(passiveIncome)} Δt/с</div>
           </div>
         </div>
+        {/* Boost button */}
+        {sdkAvailable && !boostActive && (
+          <button onClick={handleActivateBoost} className="w-full mt-2 bg-gradient-to-r from-green-700 to-emerald-600 border border-green-500/50 rounded-lg py-2 text-xs text-white font-bold">
+            📺 x2 доход на 4 часа (Реклама)
+          </button>
+        )}
+        {boostActive && (
+          <div className="w-full mt-2 bg-green-900/30 border border-green-600/50 rounded-lg py-2 text-xs text-green-300 text-center font-bold">
+            ⚡ БУСТ x2 АКТИВЕН — {Math.max(0, Math.floor((boostEndTime - Date.now()) / 60000))} мин
+          </div>
+        )}
       </div>
 
       {/* Boss indicator */}
@@ -790,6 +928,47 @@ export default function App() {
         </div>
       </div>
 
+      {/* Rewarded ads */}
+      {sdkAvailable && (
+        <div className="bg-purple-900/40 rounded-xl p-4 border border-purple-700/50">
+          <h3 className="text-sm font-bold text-purple-200 mb-3">📺 Награды за рекламу</h3>
+          <div className="space-y-2">
+            <button onClick={handleFreeShards}
+              className="w-full bg-gradient-to-r from-yellow-700 to-amber-600 border border-yellow-500/50 rounded-lg py-2 text-sm text-white font-bold">
+              💎 +10 Осколков Вечности (бесплатно, 3 раза/день)
+            </button>
+            <div className="text-xs text-purple-400 text-center">
+              Осталось просмотров: {getRemainingRewardedAds()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SDK Status */}
+      <div className="bg-purple-900/40 rounded-xl p-4 border border-purple-700/50">
+        <h3 className="text-sm font-bold text-purple-200 mb-2">🔌 Статус подключения</h3>
+        <div className="text-xs space-y-1">
+          <div className="flex justify-between">
+            <span className="text-purple-400">Yandex Games SDK:</span>
+            <span className={sdkAvailable ? 'text-green-400' : 'text-red-400'}>
+              {sdkAvailable ? '✓ Подключён' : '✗ Недоступен'}
+            </span>
+          </div>
+          {sdkReady && (
+            <>
+              <div className="flex justify-between">
+                <span className="text-purple-400">Облачные сохранения:</span>
+                <span className="text-green-400">✓ Активны</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-purple-400">Лидерборды:</span>
+                <span className="text-green-400">✓ Активны</span>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
       {/* Settings */}
       <div className="bg-purple-900/40 rounded-xl p-4 border border-purple-700/50">
         <h3 className="text-sm font-bold text-purple-200 mb-3">⚙️ Настройки</h3>
@@ -891,9 +1070,11 @@ export default function App() {
               <button onClick={() => handleOfflineCollect(1)} className="w-full btn-primary py-3">
                 Забрать
               </button>
-              <button onClick={() => handleOfflineCollect(3)} className="w-full btn-gold py-3">
-                📺 Реклама → x3 ({formatNumber(offlineIncome.mul(3))} Δt)
-              </button>
+              {sdkAvailable && (
+                <button onClick={() => handleOfflineCollect(3)} className="w-full btn-gold py-3">
+                  📺 Реклама → x3 ({formatNumber(offlineIncome.mul(3))} Δt)
+                </button>
+              )}
             </div>
           </div>
         </div>
