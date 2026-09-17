@@ -1,1 +1,150 @@
 @import "tailwindcss";
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 20px rgba(168, 85, 247, 0.4), 0 0 40px rgba(168, 85, 247, 0.2); }
+  50% { box-shadow: 0 0 30px rgba(168, 85, 247, 0.6), 0 0 60px rgba(168, 85, 247, 0.3); }
+}
+
+@keyframes float-up {
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-80px) scale(1.5); opacity: 0; }
+}
+
+@keyframes particle-fly {
+  0% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(var(--tx), var(--ty)) scale(0); opacity: 0; }
+}
+
+@keyframes crit-flash {
+  0% { transform: scale(1); filter: brightness(1); }
+  50% { transform: scale(1.1); filter: brightness(2); }
+  100% { transform: scale(1); filter: brightness(1); }
+}
+
+@keyframes slide-in {
+  0% { transform: translateY(100%); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+
+@keyframes boss-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+@keyframes spin-slow {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes orbit {
+  0% { transform: rotate(0deg) translateX(var(--orbit-radius)) rotate(0deg); }
+  100% { transform: rotate(360deg) translateX(var(--orbit-radius)) rotate(-360deg); }
+}
+
+@keyframes fade-in {
+  0% { opacity: 0; transform: scale(0.9); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes combo-pulse {
+  0%, 100% { transform: scaleX(1); }
+  50% { transform: scaleX(1.02); }
+}
+
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-float-up { animation: float-up 1s ease-out forwards; }
+.animate-particle { animation: particle-fly 0.8s ease-out forwards; }
+.animate-crit-flash { animation: crit-flash 0.3s ease-out; }
+.animate-slide-in { animation: slide-in 0.3s ease-out; }
+.animate-shake { animation: shake 0.3s ease-out; }
+.animate-boss-pulse { animation: boss-pulse 2s ease-in-out infinite; }
+.animate-spin-slow { animation: spin-slow 20s linear infinite; }
+.animate-orbit { animation: orbit var(--orbit-duration) linear infinite; }
+.animate-fade-in { animation: fade-in 0.3s ease-out; }
+.animate-combo-pulse { animation: combo-pulse 0.5s ease-in-out infinite; }
+
+.chrono-sphere {
+  background: radial-gradient(circle at 30% 30%, #c084fc, #7c3aed 40%, #4c1d95 70%, #1e0a3c);
+  border: 3px solid rgba(192, 132, 252, 0.6);
+  transition: transform 0.1s ease-out;
+}
+
+.chrono-sphere:active {
+  transform: scale(0.9);
+}
+
+.chrono-sphere.crit {
+  animation: crit-flash 0.3s ease-out;
+  border-color: #fbbf24;
+  box-shadow: 0 0 40px rgba(251, 191, 36, 0.8);
+}
+
+.generator-sprite {
+  animation: orbit var(--orbit-duration, 8s) linear infinite;
+}
+
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: linear-gradient(180deg, #0a0014 0%, #1a0033 50%, #0d001a 100%);
+  color: #e2e8f0;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+.epoch-chaos { background: linear-gradient(180deg, #0a0014 0%, #1a0033 50%, #0d001a 100%); }
+.epoch-ancient { background: linear-gradient(180deg, #0a1400 0%, #1a3300 50%, #0d1a00 100%); }
+.epoch-steam { background: linear-gradient(180deg, #14100a 0%, #332a1a 50%, #1a150d 100%); }
+.epoch-atom { background: linear-gradient(180deg, #0a0a14 0%, #1a1a33 50%, #0d0d1a 100%); }
+.epoch-singularity { background: linear-gradient(180deg, #001414 0%, #003333 50%, #001a1a 100%); }
+
+.btn-primary {
+  background: linear-gradient(135deg, #7c3aed, #a855f7);
+  border: 1px solid rgba(168, 85, 247, 0.5);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.btn-primary:hover { background: linear-gradient(135deg, #6d28d9, #9333ea); transform: translateY(-1px); }
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+.btn-gold {
+  background: linear-gradient(135deg, #b45309, #f59e0b);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.tab-active {
+  background: linear-gradient(135deg, #7c3aed, #a855f7);
+  color: white;
+}
+
+.progress-bar {
+  background: linear-gradient(90deg, #7c3aed, #a855f7, #c084fc);
+  border-radius: 4px;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.hp-bar {
+  background: linear-gradient(90deg, #dc2626, #ef4444);
+  border-radius: 4px;
+  height: 100%;
+  transition: width 0.3s ease;
+}
