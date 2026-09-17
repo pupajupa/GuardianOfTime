@@ -2,14 +2,43 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="theme-color" content="#0a0014" />
     <title>Хранитель Времени | Chrono Keeper</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
-    <!-- Yandex Games SDK -->
-    <script src="https://yandex.ru/games/sdk/v2" async></script>
+    <!-- Yandex Games SDK: относительный путь для серверов Яндекса (пункт 1.7) -->
+    <script src="/sdk.js"></script>
     <style>
-      html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0a0014; }
-      #root { width: 100%; height: 100%; }
+      /* Блокировка системного скролла, pull-to-refresh, зума, выделения (пункты 1.6.1.8, 1.6.2.7, 1.10.2) */
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0a0014;
+        overscroll-behavior: none;
+        -webkit-overflow-scrolling: auto;
+        touch-action: manipulation;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
+        position: fixed;
+        top: 0;
+        left: 0;
+      }
+      /* Предотвращение выделения текста и картинок */
+      * {
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+      }
+      img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
+      #root { width: 100%; height: 100%; overflow: hidden; }
     </style>
   </head>
   <body>

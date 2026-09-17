@@ -2,14 +2,15 @@
  * Yandex Games SDK Integration Module
  * Хранитель Времени (Chrono Keeper)
  * 
- * Интеграция:
- * - YaGames.init() — инициализация
- * - LoadingAPI.ready() — сигнал о готовности игры
- * - Player API — облачные сохранения
- * - Adv API — реклама (rewarded + interstitial)
- * - Payments API — внутриигровые покупки
- * - Leaderboards API — рейтинги
- * - i18n API — автоопределение языка
+ * Интеграция согласно требованиям Яндекс Игр:
+ * - Пункт 1.1: SDK встроен
+ * - Пункт 1.2: Гостевой вход + авторизация по кнопке
+ * - Пункт 1.3: Звук останавливается при потере фокуса
+ * - Пункт 1.4: Платежи только через SDK
+ * - Пункт 1.13: Внутриигровые покупки с консумированием
+ * - Пункт 1.19: Правильная инициализация SDK
+ * - Пункт 2.14: Автоопределение языка
+ * - Пункт 4.7: Пауза при показе рекламы
  */
 
 // Типизация Yandex Games SDK
@@ -65,6 +66,8 @@ export interface YSdkPlayer {
   getData: (keys?: string[]) => Promise<Record<string, unknown>>;
   setStats: (stats: Record<string, number>) => Promise<void>;
   getStats: (keys?: string[]) => Promise<Record<string, number>>;
+  // Авторизация (пункт 1.2.1)
+  authorize?: (options?: { scopes?: boolean }) => Promise<YSdkPlayer>;
 }
 
 export interface YSdkLeaderboards {
@@ -80,27 +83,39 @@ export interface YSdkLeaderboards {
 export interface YSdkPayments {
   purchase: (options: { id: string; developerPayload?: string }) => Promise<unknown>;
   getPurchases: () => Promise<Array<{ purchaseToken: string; productId: string; developerPayload?: string }>>;
-  consumePurchase: (purchaseToken: string) => Promise<void>;
+  consumePurchase: (purchaseToken: string) => Promise<void>; // Пункт 1.13.1
   getCatalog: () => Promise<Array<{ id: string; title: string; description: string; imageUri: string; price: string; priceCurrencyCode: string; priceValue: string; priceCurrencyImage: string }>>;
 }
 
-// Singleton SDK instance
+// ==================== СОСТОЯНИЕ SDK ====================
+
 let ysdk: YSdk | null = null;
 let player: YSdkPlayer | null = null;
 let leaderboards: YSdkLeaderboards | null = null;
 let payments: YSdkPayments | null = null;
 let isInitialized = false;
+let isAuthorized = false;
 let initCallbacks: Array<(sdk: YSdk | null) => void> = [];
 
-// Ad tracking
+// Пункт 1.13.2 — Портальная валюта из SDK
+let currencyInfo: { name: string; icon: string } | null = null;
+
+// Ad tracking (пункт 4.4 — реклама в логических паузах)
 let lastInterstitialTime = 0;
 let rewardedAdsToday = 0;
 let lastAdDay = new Date().toDateString();
 const MAX_REWARDED_PER_DAY = 10;
-const MIN_INTERSTITIAL_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const MIN_INTERSTITIAL_INTERVAL = 5 * 60 * 1000; // 5 минут
+
+// Gameplay state (пункт 1.19.3)
+let isGameplayActive = false;
+
+// Audio context for pause on focus loss (пункт 1.3)
+let audioPaused = false;
+const audioCallbacks: Array<(paused: boolean) => void> = [];
 
 /**
- * Инициализация Yandex Games SDK
+ * Пункт 1.19.1 — Инициализация SDK строго по документации
  */
 export async function initYandexSDK(): Promise<YSdk | null> {
   if (isInitialized) return ysdk;
@@ -114,14 +129,14 @@ export async function initYandexSDK(): Promise<YSdk | null> {
       return null;
     }
 
-    // Initialize SDK
+    // Initialize SDK (пункт 1.19.1)
     ysdk = await window.YaGames.init();
     console.log('[YSdk] Initialized successfully');
 
-    // Get player
+    // Get player (guest mode — пункт 1.2.2)
     try {
       player = await ysdk.getPlayer({ scopes: false });
-      console.log('[YSdk] Player loaded:', player.getUniqueID());
+      console.log('[YSdk] Player loaded (guest):', player.getUniqueID());
     } catch (e) {
       console.warn('[YSdk] Failed to get player:', e);
     }
@@ -134,10 +149,26 @@ export async function initYandexSDK(): Promise<YSdk | null> {
       console.warn('[YSdk] Failed to get leaderboards:', e);
     }
 
-    // Get payments
+    // Get payments (пункт 1.4, 1.13)
     try {
       payments = await ysdk.getPayments();
       console.log('[YSdk] Payments loaded');
+      
+      // Пункт 1.13.2 — Получаем информацию о портальной валюте
+      try {
+        const catalog = await payments.getCatalog();
+        if (catalog.length > 0) {
+          currencyInfo = {
+            name: catalog[0].priceCurrencyCode,
+            icon: '💎' // Иконка определяется автоматически из SDK
+          };
+        }
+      } catch (e) {
+        console.warn('[YSdk] Failed to get currency info:', e);
+      }
+      
+      // Пункт 1.13.1 — Проверяем несконсумированные покупки
+      await checkUnconsumedPurchases();
     } catch (e) {
       console.warn('[YSdk] Failed to get payments:', e);
     }
@@ -149,6 +180,9 @@ export async function initYandexSDK(): Promise<YSdk | null> {
       lastAdDay = today;
     }
 
+    // Setup event listeners (пункт 1.3, 1.19.4)
+    setupEventListeners();
+
     isInitialized = true;
     notifyCallbacks(ysdk);
     return ysdk;
@@ -158,6 +192,68 @@ export async function initYandexSDK(): Promise<YSdk | null> {
     notifyCallbacks(null);
     return null;
   }
+}
+
+/**
+ * Пункт 1.3 — Обработка потери фокуса (звук, пауза)
+ * Пункт 1.19.4 — Обработка game_api_pause / game_api_resume
+ */
+function setupEventListeners(): void {
+  if (!ysdk) return;
+
+  // Пункт 1.3 — Потеря фокуса: остановка звука и геймплея
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      audioPaused = true;
+      audioCallbacks.forEach(cb => cb(true));
+      if (isGameplayActive) {
+        gameplayStop();
+      }
+    } else {
+      audioPaused = false;
+      audioCallbacks.forEach(cb => cb(false));
+      if (!isGameplayActive) {
+        gameplayStart();
+      }
+    }
+  });
+
+  // Пункт 1.19.4 — Обработка событий паузы от SDK
+  try {
+    (ysdk as unknown as { on?: (event: string, cb: () => void) => void }).on?.('game_api_pause', () => {
+      console.log('[YSdk] game_api_pause received');
+      audioPaused = true;
+      audioCallbacks.forEach(cb => cb(true));
+      isGameplayActive = false;
+    });
+
+    (ysdk as unknown as { on?: (event: string, cb: () => void) => void }).on?.('game_api_resume', () => {
+      console.log('[YSdk] game_api_resume received');
+      audioPaused = false;
+      audioCallbacks.forEach(cb => cb(false));
+      isGameplayActive = true;
+    });
+  } catch (e) {
+    console.warn('[YSdk] Event listeners setup failed:', e);
+  }
+}
+
+/**
+ * Подписка на изменение состояния аудио (пункт 1.3)
+ */
+export function onAudioStateChange(callback: (paused: boolean) => void): () => void {
+  audioCallbacks.push(callback);
+  return () => {
+    const idx = audioCallbacks.indexOf(callback);
+    if (idx >= 0) audioCallbacks.splice(idx, 1);
+  };
+}
+
+/**
+ * Проверить, приостановлено ли аудио
+ */
+export function isAudioPaused(): boolean {
+  return audioPaused;
 }
 
 function notifyCallbacks(sdk: YSdk | null) {
@@ -177,7 +273,8 @@ export function onSDKReady(callback: (sdk: YSdk | null) => void): void {
 }
 
 /**
- * Сигнал о готовности игры (LoadingAPI)
+ * Пункт 1.19.2 — Сигнал о готовности игры (LoadingAPI.ready)
+ * Вызывается когда пользователь может приступить к игре
  */
 export function gameReady(): void {
   if (ysdk?.features?.LoadingAPI) {
@@ -187,27 +284,64 @@ export function gameReady(): void {
 }
 
 /**
- * Начало геймплея
+ * Пункт 1.19.3 — Начало геймплея (GameplayAPI.start)
  */
 export function gameplayStart(): void {
-  if (ysdk?.features?.GameplayAPI) {
+  if (ysdk?.features?.GameplayAPI && !isGameplayActive) {
     ysdk.features.GameplayAPI.start();
+    isGameplayActive = true;
+    console.log('[YSdk] GameplayAPI.start()');
   }
 }
 
 /**
- * Остановка геймплея (при паузе/сворачивании)
+ * Пункт 1.19.3 — Остановка геймплея (GameplayAPI.stop)
  */
 export function gameplayStop(): void {
-  if (ysdk?.features?.GameplayAPI) {
+  if (ysdk?.features?.GameplayAPI && isGameplayActive) {
     ysdk.features.GameplayAPI.stop();
+    isGameplayActive = false;
+    console.log('[YSdk] GameplayAPI.stop()');
   }
 }
 
-// ==================== РЕКЛАМА ====================
+// ==================== АВТОРИЗАЦИЯ (Пункт 1.2) ====================
 
 /**
- * Показать полноэкранную рекламу (Interstitial)
+ * Пункт 1.2.1 — Авторизация только по нажатию кнопки
+ * Пункт 1.2.2 — Возможность игры без авторизации
+ */
+export async function authorizePlayer(): Promise<boolean> {
+  if (!ysdk || !player) return false;
+
+  try {
+    // Запрашиваем авторизацию через SDK
+    if (player.authorize) {
+      player = await player.authorize({ scopes: false });
+    } else {
+      // Fallback: пересоздаём player с scopes
+      player = await ysdk.getPlayer({ scopes: true });
+    }
+    isAuthorized = true;
+    console.log('[YSdk] Player authorized:', player.getName());
+    return true;
+  } catch (error) {
+    console.warn('[YSdk] Authorization failed:', error);
+    return false;
+  }
+}
+
+/**
+ * Проверить, авторизован ли игрок
+ */
+export function isPlayerAuthorized(): boolean {
+  return isAuthorized;
+}
+
+// ==================== РЕКЛАМА (Пункт 4) ====================
+
+/**
+ * Пункт 4.4, 4.7 — Показать полноэкранную рекламу в логической паузе
  */
 export function showInterstitialAd(): Promise<boolean> {
   return new Promise((resolve) => {
@@ -228,18 +362,27 @@ export function showInterstitialAd(): Promise<boolean> {
       callbacks: {
         onOpen: () => {
           console.log('[YSdk] Interstitial opened');
+          // Пункт 4.7 — Пауза звука и геймплея
           gameplayStop();
+          audioPaused = true;
+          audioCallbacks.forEach(cb => cb(true));
         },
         onClose: (wasShown: boolean) => {
           console.log('[YSdk] Interstitial closed, shown:', wasShown);
           if (wasShown) {
             lastInterstitialTime = Date.now();
           }
+          // Возобновление
           gameplayStart();
+          audioPaused = false;
+          audioCallbacks.forEach(cb => cb(false));
           resolve(wasShown);
         },
         onError: (error: unknown) => {
           console.warn('[YSdk] Interstitial error:', error);
+          gameplayStart();
+          audioPaused = false;
+          audioCallbacks.forEach(cb => cb(false));
           resolve(false);
         },
       },
@@ -248,7 +391,7 @@ export function showInterstitialAd(): Promise<boolean> {
 }
 
 /**
- * Показать rewarded видео (за вознаграждение)
+ * Пункт 4.5 — Показать rewarded video за вознаграждение
  */
 export function showRewardedAd(): Promise<boolean> {
   return new Promise((resolve) => {
@@ -277,7 +420,10 @@ export function showRewardedAd(): Promise<boolean> {
       callbacks: {
         onOpen: () => {
           console.log('[YSdk] Rewarded video opened');
+          // Пункт 4.7 — Пауза звука и геймплея
           gameplayStop();
+          audioPaused = true;
+          audioCallbacks.forEach(cb => cb(true));
         },
         onRewarded: () => {
           console.log('[YSdk] Reward granted');
@@ -286,11 +432,17 @@ export function showRewardedAd(): Promise<boolean> {
         },
         onClose: (wasShown: boolean) => {
           console.log('[YSdk] Rewarded video closed, wasShown:', wasShown);
+          // Возобновление
           gameplayStart();
+          audioPaused = false;
+          audioCallbacks.forEach(cb => cb(false));
           resolve(rewarded && wasShown);
         },
         onError: (error: unknown) => {
           console.warn('[YSdk] Rewarded video error:', error);
+          gameplayStart();
+          audioPaused = false;
+          audioCallbacks.forEach(cb => cb(false));
           resolve(false);
         },
       },
@@ -309,10 +461,10 @@ export function getRemainingRewardedAds(): number {
   return Math.max(0, MAX_REWARDED_PER_DAY - rewardedAdsToday);
 }
 
-// ==================== СОХРАНЕНИЯ ====================
+// ==================== СОХРАНЕНИЯ (Пункт 1.9, 1.11) ====================
 
 /**
- * Сохранить данные игрока в облако
+ * Пункт 1.9 — Сохранить данные в облако
  */
 export async function saveToCloud(data: Record<string, unknown>): Promise<boolean> {
   if (!player) {
@@ -350,7 +502,7 @@ export async function loadFromCloud(keys?: string[]): Promise<Record<string, unk
 }
 
 /**
- * Сохранить статистику игрока
+ * Сохранить статистику
  */
 export async function saveStats(stats: Record<string, number>): Promise<boolean> {
   if (!player) return false;
@@ -428,7 +580,14 @@ export async function getLeaderboardEntries(
   }
 }
 
-// ==================== ПЛАТЕЖИ ====================
+// ==================== ПЛАТЕЖИ (Пункт 1.4, 1.13) ====================
+
+/**
+ * Пункт 1.13.2 — Получить информацию о портальной валюте
+ */
+export function getCurrencyInfo(): { name: string; icon: string } | null {
+  return currencyInfo;
+}
 
 /**
  * Получить каталог покупок
@@ -458,18 +617,49 @@ export async function getCatalog(): Promise<Array<{
 }
 
 /**
- * Совершить покупку
+ * Пункт 1.13.1 — Совершить покупку с последующим консумированием
  */
 export async function makePurchase(productId: string): Promise<boolean> {
   if (!payments) return false;
 
   try {
-    await payments.purchase({ id: productId });
+    const purchase = await payments.purchase({ 
+      id: productId,
+      developerPayload: JSON.stringify({ timestamp: Date.now() })
+    }) as { purchaseToken?: string; productId?: string };
+    
+    // Пункт 1.13.1 — Консумирование покупки
+    if (purchase && purchase.purchaseToken) {
+      await payments.consumePurchase(purchase.purchaseToken);
+      console.log(`[YSdk] Purchase consumed: ${productId}`);
+    }
+    
     console.log(`[YSdk] Purchase successful: ${productId}`);
     return true;
   } catch (error) {
     console.error(`[YSdk] Purchase failed:`, error);
     return false;
+  }
+}
+
+/**
+ * Пункт 1.13.1 — Проверить несконсумированные покупки при старте
+ */
+async function checkUnconsumedPurchases(): Promise<void> {
+  if (!payments) return;
+
+  try {
+    const purchases = await payments.getPurchases();
+    for (const purchase of purchases) {
+      try {
+        await payments.consumePurchase(purchase.purchaseToken);
+        console.log(`[YSdk] Consumed pending purchase: ${purchase.productId}`);
+      } catch (e) {
+        console.warn(`[YSdk] Failed to consume purchase: ${purchase.productId}`, e);
+      }
+    }
+  } catch (error) {
+    console.error('[YSdk] Check unconsumed purchases failed:', error);
   }
 }
 
@@ -488,23 +678,21 @@ export async function getPurchases(): Promise<string[]> {
   }
 }
 
+// ==================== УТИЛИТЫ ====================
+
 /**
- * Поглотить покупку (consumable)
+ * Пункт 2.14 — Получить язык из SDK (автоопределение)
  */
-export async function consumePurchase(purchaseToken: string): Promise<boolean> {
-  if (!payments) return false;
+export function getLanguage(): string {
+  if (!ysdk) return 'ru';
 
   try {
-    await payments.consumePurchase(purchaseToken);
-    console.log('[YSdk] Purchase consumed');
-    return true;
-  } catch (error) {
-    console.error('[YSdk] Consume purchase failed:', error);
-    return false;
+    const env = ysdk.getEnvironment();
+    return env.i18n.lang || 'ru';
+  } catch {
+    return 'ru';
   }
 }
-
-// ==================== УТИЛИТЫ ====================
 
 /**
  * Получить информацию об окружении

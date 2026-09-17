@@ -14,7 +14,8 @@ import {
   initYandexSDK, gameReady, gameplayStart, gameplayStop,
   showInterstitialAd, showRewardedAd, getRemainingRewardedAds,
   saveToCloud, loadFromCloud, submitScore,
-  isSDKAvailable, isSDKInitialized, getEnvironment
+  isSDKAvailable, isSDKInitialized, getEnvironment, getLanguage,
+  authorizePlayer, isPlayerAuthorized, onAudioStateChange
 } from './game/yandex-sdk';
 
 type Tab = 'world' | 'shop' | 'story' | 'tree' | 'profile';
@@ -73,6 +74,20 @@ export default function App() {
   const [sdkAvailable, setSdkAvailable] = useState(false);
   const [boostActive, setBoostActive] = useState(false);
   const [boostEndTime, setBoostEndTime] = useState(0);
+  
+  // Пункт 1.2 — Авторизация
+  const [isAuthorized, setIsAuthorized] = useState(false);
+  const [showAuthPrompt, setShowAuthPrompt] = useState(false);
+  
+  // Пункт 6.3 — Пауза
+  const [isPaused, setIsPaused] = useState(false);
+  
+  // Пункт 6.8 — Обучение
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState(0);
+  
+  // Пункт 1.3 — Состояние аудио
+  const [audioMuted, setAudioMuted] = useState(false);
 
   // Initialize Yandex Games SDK
   useEffect(() => {
@@ -81,20 +96,15 @@ export default function App() {
       const sdk = await initYandexSDK();
       if (sdk) {
         setSdkReady(true);
-        // Signal game ready
-        gameReady();
-        gameplayStart();
+        
+        // Пункт 2.14 — Автоопределение языка через SDK
+        const lang = getLanguage();
+        setState(prev => ({
+          ...prev,
+          settings: { ...prev.settings, language: lang }
+        }));
 
-        // Detect language from SDK
-        const env = getEnvironment();
-        if (env) {
-          setState(prev => ({
-            ...prev,
-            settings: { ...prev.settings, language: env.lang }
-          }));
-        }
-
-        // Try to load cloud save
+        // Try to load cloud save (пункт 1.9, 1.11)
         const cloudData = await loadFromCloud();
         if (cloudData && cloudData.saveData) {
           try {
@@ -112,29 +122,78 @@ export default function App() {
             console.warn('Cloud save parse error:', e);
           }
         }
+        
+        // Signal game ready (пункт 1.19.2)
+        gameReady();
+        gameplayStart();
+        
+        // Пункт 6.8 — Показать обучение для новых игроков
+        const saved = loadGame();
+        if (!saved || saved.totalClicks < 5) {
+          setShowTutorial(true);
+          setTutorialStep(0);
+        }
+      } else {
+        // SDK не доступен — всё равно показываем обучение для новых игроков
+        const saved = loadGame();
+        if (!saved || saved.totalClicks < 5) {
+          setShowTutorial(true);
+          setTutorialStep(0);
+        }
+        // Без SDK — сразу готовы к игре
+        gameReady();
+        gameplayStart();
       }
     };
     initSDK();
   }, []);
+  
+  // Пункт 1.3 — Подписка на состояние аудио (пауза при потере фокуса)
+  useEffect(() => {
+    const unsubscribe = onAudioStateChange((paused) => {
+      if (paused) {
+        setAudioMuted(true);
+      }
+    });
+    return unsubscribe;
+  }, []);
 
-  // Handle visibility change (pause/resume)
+  // Handle visibility change (pause/resume) — пункт 1.3
   useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden) {
+        // Пункт 1.3 — Остановка звука и геймплея при потере фокуса
         gameplayStop();
+        setAudioMuted(true);
+        // Пункт 1.9 — Сохранение при сворачивании
         saveGame(stateRef.current);
-        // Cloud save
         if (sdkReady) {
           const exportCode = exportSave(stateRef.current);
           saveToCloud({ saveData: exportCode, timestamp: Date.now() });
         }
       } else {
         gameplayStart();
+        setAudioMuted(false);
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [sdkReady]);
+  
+  // Пункт 1.6.1.8 / 1.6.2.7 — Отключение контекстного меню
+  useEffect(() => {
+    const preventContextMenu = (e: Event) => {
+      e.preventDefault();
+      return false;
+    };
+    document.addEventListener('contextmenu', preventContextMenu);
+    // Предотвращение long-press выделения на iOS
+    document.addEventListener('selectstart', preventContextMenu);
+    return () => {
+      document.removeEventListener('contextmenu', preventContextMenu);
+      document.removeEventListener('selectstart', preventContextMenu);
+    };
+  }, []);
 
   // Check for offline income on load
   useEffect(() => {
@@ -404,15 +463,38 @@ export default function App() {
   }, []);
 
   const handleBuyGenerator = (genId: string) => {
-    setState(prev => buyGenerator(prev, genId, buyAmount));
+    setState(prev => {
+      const newState = buyGenerator(prev, genId, buyAmount);
+      // Пункт 1.9 — Сохранение после действия игрока
+      if (newState !== prev) {
+        setTimeout(() => saveGame(newState), 0);
+      }
+      return newState;
+    });
   };
 
   const handleBuyUpgrade = (upgradeId: string) => {
-    setState(prev => applyUpgrade(prev, upgradeId));
+    setState(prev => {
+      const newState = applyUpgrade(prev, upgradeId);
+      // Пункт 1.9 — Сохранение после действия игрока
+      if (newState !== prev) {
+        setTimeout(() => saveGame(newState), 0);
+      }
+      return newState;
+    });
   };
 
   const handlePrestige = async () => {
-    setState(prev => performPrestige(prev));
+    setState(prev => {
+      const newState = performPrestige(prev);
+      // Пункт 1.9 — Сохранение сразу после престижа
+      saveGame(newState);
+      if (sdkReady) {
+        const exportCode = exportSave(newState);
+        saveToCloud({ saveData: exportCode, timestamp: Date.now() });
+      }
+      return newState;
+    });
     setShowPrestige(false);
     setTab('world');
     // Show interstitial after prestige
@@ -468,6 +550,51 @@ export default function App() {
       setState(imported);
       setShowExport(false);
       setImportText('');
+      // Пункт 1.9 — Сохранение после действия
+      saveGame(imported);
+    }
+  };
+
+  // Пункт 1.2.1 — Авторизация по нажатию кнопки
+  const handleAuthorize = async () => {
+    const success = await authorizePlayer();
+    if (success) {
+      setIsAuthorized(true);
+      setShowAuthPrompt(false);
+      // Синхронизация сохранения после авторизации
+      saveGame(stateRef.current);
+      if (sdkReady) {
+        const exportCode = exportSave(stateRef.current);
+        saveToCloud({ saveData: exportCode, timestamp: Date.now() });
+      }
+    }
+  };
+
+  // Пункт 6.3 — Пауза
+  const handlePause = () => {
+    setIsPaused(true);
+    gameplayStop();
+    setAudioMuted(true);
+    // Сохранение при паузе
+    saveGame(stateRef.current);
+  };
+
+  const handleResume = () => {
+    setIsPaused(false);
+    gameplayStart();
+    setAudioMuted(false);
+  };
+
+  // Пункт 6.8 — Обучение
+  const handleTutorialNext = () => {
+    if (tutorialStep < 4) {
+      setTutorialStep(prev => prev + 1);
+    } else {
+      setShowTutorial(false);
+      // Пункт 1.2.1 — Предложить авторизацию после обучения (только для новых игроков)
+      if (sdkAvailable && !isAuthorized && state.totalClicks < 10) {
+        setTimeout(() => setShowAuthPrompt(true), 1000);
+      }
     }
   };
 
@@ -877,6 +1004,27 @@ export default function App() {
 
   const renderProfileScreen = () => (
     <div className="flex flex-col h-full overflow-y-auto scrollbar-hide p-4 space-y-4">
+      {/* Пункт 1.2 — Авторизация */}
+      {sdkAvailable && !isAuthorized && (
+        <div className="bg-gradient-to-r from-blue-900/40 to-purple-900/40 rounded-xl p-4 border border-blue-700/50">
+          <h3 className="text-sm font-bold text-blue-200 mb-2">🔐 Авторизация</h3>
+          <p className="text-xs text-blue-300 mb-3">
+            Войдите через Яндекс ID для облачных сохранений и рейтингов
+          </p>
+          <button onClick={() => setShowAuthPrompt(true)} className="w-full btn-primary py-2 text-sm">
+            Войти через Яндекс ID
+          </button>
+        </div>
+      )}
+      {isAuthorized && (
+        <div className="bg-green-900/20 rounded-xl p-3 border border-green-700/30">
+          <div className="flex items-center gap-2">
+            <span className="text-green-400">✓</span>
+            <span className="text-sm text-green-300">Авторизованы — облачные сохранения активны</span>
+          </div>
+        </div>
+      )}
+
       {/* Stats */}
       <div className="bg-purple-900/40 rounded-xl p-4 border border-purple-700/50">
         <h3 className="text-sm font-bold text-purple-200 mb-3">📊 Статистика</h3>
@@ -1028,6 +1176,10 @@ export default function App() {
               <div className="text-xs text-purple-300">{state.shards} 💎</div>
               {state.aeonites > 0 && <div className="text-xs text-yellow-300">{state.aeonites} 💫</div>}
             </div>
+            {/* Пункт 6.3 — Кнопка паузы */}
+            <button onClick={handlePause} className="w-8 h-8 flex items-center justify-center bg-purple-800/50 rounded-lg border border-purple-600/30 text-purple-300 text-sm">
+              ⏸
+            </button>
           </div>
         </div>
       </div>
@@ -1208,6 +1360,123 @@ export default function App() {
                 </div>
               );
             })()}
+          </div>
+        </div>
+      )}
+
+      {/* Пункт 6.3 — Модальное окно паузы */}
+      {isPaused && (
+        <div className="absolute inset-0 bg-black/90 flex items-center justify-center z-50 p-4">
+          <div className="bg-purple-900 border border-purple-600 rounded-2xl p-6 max-w-sm w-full animate-fade-in text-center">
+            <div className="text-4xl mb-3">⏸️</div>
+            <h3 className="text-lg font-bold text-white mb-4">Пауза</h3>
+            <div className="space-y-3">
+              <button onClick={handleResume} className="w-full btn-primary py-3">
+                ▶️ Продолжить
+              </button>
+              <button onClick={() => { saveGame(stateRef.current); alert('Игра сохранена!'); }} className="w-full bg-purple-800/50 border border-purple-600/50 rounded-lg py-2 text-purple-200 text-sm">
+                💾 Сохранить
+              </button>
+              <label className="flex items-center justify-between px-2 py-1">
+                <span className="text-sm text-purple-300">🔊 Звук</span>
+                <input 
+                  type="checkbox" 
+                  checked={!audioMuted}
+                  onChange={(e) => setAudioMuted(!e.target.checked)}
+                  className="w-5 h-5 accent-purple-500" 
+                />
+              </label>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Пункт 6.8 — Обучение */}
+      {showTutorial && (
+        <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-purple-900 border border-purple-600 rounded-2xl p-6 max-w-sm w-full animate-fade-in">
+            {tutorialStep === 0 && (
+              <>
+                <div className="text-4xl text-center mb-3">⏳</div>
+                <h3 className="text-lg font-bold text-white text-center mb-2">Добро пожаловать!</h3>
+                <p className="text-sm text-purple-200 text-center mb-4">
+                  Вы — Эон, последний Хранитель Времени. Великий Хронокатаклизм разорвал ткань времени. 
+                  Ваша задача — восстановить поток Времени, кликая по Хроносфере!
+                </p>
+              </>
+            )}
+            {tutorialStep === 1 && (
+              <>
+                <div className="text-4xl text-center mb-3">👆</div>
+                <h3 className="text-lg font-bold text-white text-center mb-2">Кликайте!</h3>
+                <p className="text-sm text-purple-200 text-center mb-4">
+                  Нажимайте на Хроносферу в центре экрана, чтобы получать Время (Δt). 
+                  Быстрые клики создают КОМБО — множитель x2 к урону!
+                </p>
+              </>
+            )}
+            {tutorialStep === 2 && (
+              <>
+                <div className="text-4xl text-center mb-3">⚙️</div>
+                <h3 className="text-lg font-bold text-white text-center mb-2">Генераторы</h3>
+                <p className="text-sm text-purple-200 text-center mb-4">
+                  Тратьте Время на генераторы — они приносят Δt автоматически, даже когда вы не кликаете! 
+                  Покупайте их во вкладке «Магазин».
+                </p>
+              </>
+            )}
+            {tutorialStep === 3 && (
+              <>
+                <div className="text-4xl text-center mb-3">📖</div>
+                <h3 className="text-lg font-bold text-white text-center mb-2">Эпохи и Сюжет</h3>
+                <p className="text-sm text-purple-200 text-center mb-4">
+                  Пройдите через 5 великих эпох — от Хаоса до Сингулярности. 
+                  В конце каждой эпохи вас ждёт босс! Откройте вкладку «Сюжет».
+                </p>
+              </>
+            )}
+            {tutorialStep === 4 && (
+              <>
+                <div className="text-4xl text-center mb-3">🔄</div>
+                <h3 className="text-lg font-bold text-white text-center mb-2">Престиж</h3>
+                <p className="text-sm text-purple-200 text-center mb-4">
+                  После победы над боссом вы можете совершить «Сдвиг Времени» — перерождение, 
+                  которое даст вам вечные Эониты и усилит ваш следующий проход!
+                </p>
+              </>
+            )}
+            <div className="flex justify-between items-center mt-4">
+              <span className="text-xs text-purple-400">
+                {tutorialStep + 1} / 5
+              </span>
+              <button onClick={handleTutorialNext} className="btn-primary px-6 py-2">
+                {tutorialStep < 4 ? 'Далее →' : 'Начать игру! 🎮'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Пункт 1.2.1 — Предложение авторизации */}
+      {showAuthPrompt && (
+        <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-purple-900 border border-purple-600 rounded-2xl p-6 max-w-sm w-full animate-fade-in text-center">
+            <div className="text-4xl mb-3">🔐</div>
+            <h3 className="text-lg font-bold text-white mb-2">Войти через Яндекс ID</h3>
+            <p className="text-sm text-purple-200 mb-4">
+              Авторизация позволит:<br/>
+              ✓ Сохранять прогресс в облаке<br/>
+              ✓ Играть с любого устройства<br/>
+              ✓ Участвовать в рейтингах
+            </p>
+            <div className="space-y-2">
+              <button onClick={handleAuthorize} className="w-full btn-primary py-3">
+                Войти через Яндекс
+              </button>
+              <button onClick={() => setShowAuthPrompt(false)} className="w-full py-2 text-purple-400 text-sm">
+                Продолжить без входа
+              </button>
+            </div>
           </div>
         </div>
       )}
